@@ -1,0 +1,82 @@
+name: mac-acceptance-download
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_url:
+        description: Short-lived official Actions ZIP HTTPS URL for the frozen candidate
+        type: string
+        required: true
+permissions:
+  contents: write
+concurrency:
+  group: frozen-mac-acceptance-8ff9224
+  cancel-in-progress: false
+jobs:
+  transfer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ARTIFACT_URL: ${{ inputs.artifact_url }}
+      TEST_TAG: mac-acceptance-8ff9224
+    steps:
+      - name: Fetch and verify the exact archived DMG (never build)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$ARTIFACT_URL"
+          python3 - <<'PY'
+          import os,urllib.parse
+          u=urllib.parse.urlsplit(os.environ['ARTIFACT_URL'])
+          assert u.scheme=='https' and u.hostname.endswith('.blob.core.windows.net')
+          PY
+          curl --fail --silent --show-error --location --retry 3 "$ARTIFACT_URL" -o candidate.zip
+          unzip -q candidate.zip -d candidate
+          cd candidate
+          echo 'f9daafbde4b6402423c1ad3b6f1463efbc1e1c025bfb2fac0e67b87720782c28  remember-me-macos-arm64-beta.dmg' | sha256sum -c -
+          test "$(stat -c %s remember-me-macos-arm64-beta.dmg)" = 1884000499
+          sha256sum -c remember-me-macos-arm64-beta.dmg.sha256
+          curl --fail --silent --show-error --location https://raw.githubusercontent.com/tech-kuiperbelt/remember-me/8ff922409b7a2a9670577adcfe9687da7e975b9f/docs/installation/macos-beta-acceptance.md -o macos-beta-acceptance.md
+          cat > notes.md <<'NOTES'
+          # Frozen macOS acceptance candidate — not an official Release
+
+          Official Remember Me v1.1.3 remains unpublished. This file is only for independent Apple Silicon Mac acceptance; the real browser/Finder/Gatekeeper check is still pending.
+
+          Source: `8ff922409b7a2a9670577adcfe9687da7e975b9f` in tech-kuiperbelt/remember-me.
+          DMG: 1,884,000,499 bytes; SHA256 `f9daafbde4b6402423c1ad3b6f1463efbc1e1c025bfb2fac0e67b87720782c28`.
+
+          Download the DMG and checksum below using Safari or Chrome, then follow macos-beta-acceptance.md. Keep Gatekeeper and quarantine enabled. The package is ad-hoc signed, without Developer ID or Apple notarization. A matching checksum is not a malware assessment. Stop on damaged/modified/harmful-app warnings.
+
+          此处只提供冻结候选供真实 Mac 验收；主仓库 v1.1.3 仍未公开。请用 Safari/Chrome 下载，核对完整 SHA256，按附件说明完成 Finder 安装、Gatekeeper 单应用例外、图标、启动和重启持久化测试。不要关闭 Gatekeeper 或删除 quarantine；未测或失败项不得标记通过。
+          NOTES
+      - name: Archive the test download in this separate repository only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd candidate
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,subprocess
+          repo=os.environ['GITHUB_REPOSITORY'];tag=os.environ['TEST_TAG']
+          assert repo=='tech-kuiperbelt/remember-me-candidates'
+          def gh(*args):return subprocess.check_output(['gh',*args],text=True)
+          def release():
+              rows=json.loads(gh('api',f'repos/{repo}/releases?per_page=100'))
+              found=[r for r in rows if r['tag_name']==tag];assert len(found)<=1
+              return found[0] if found else None
+          r=release()
+          if r is None:
+              gh('release','create',tag,'--repo',repo,'--target',os.environ['GITHUB_SHA'],'--draft','--prerelease','--latest=false','--title','Frozen macOS acceptance candidate (not official release)','--notes-file','notes.md')
+              r=release()
+          assert r['prerelease']
+          for name in ['remember-me-macos-arm64-beta.dmg','remember-me-macos-arm64-beta.dmg.sha256','macos-beta-acceptance.md']:
+              p=pathlib.Path(name);digest='sha256:'+hashlib.file_digest(p.open('rb'),'sha256').hexdigest()
+              a=next((a for a in r['assets'] if a['name']==name),None)
+              if a:assert a['state']=='uploaded' and a['size']==p.stat().st_size and a['digest']==digest
+              else:
+                  assert r['draft'],'Never append to an already public candidate'
+                  gh('release','upload',tag,name,'--repo',repo)
+          r=release()
+          assert len(r['assets'])==3
+          if r['draft']:gh('release','edit',tag,'--repo',repo,'--draft=false','--prerelease','--latest=false')
+          print(f'https://github.com/{repo}/releases/download/{tag}/remember-me-macos-arm64-beta.dmg')
+          PY
